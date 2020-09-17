@@ -1,11 +1,38 @@
+/* eslint-disable functional/no-let */
+/* eslint-disable functional/no-loop-statement */
+/* eslint-disable functional/no-this-expression */
+/* eslint-disable functional/no-class */
+
 import cal from 'ical-generator';
+import markdownTable from 'markdown-table';
 import moment from 'moment';
 import fetch from 'node-fetch';
+
 export const normalize = (team: string) => {
   const withoutSpacesAndHyphens = team.replace(/-|\s/g, '');
   const normalized = withoutSpacesAndHyphens.normalize();
   return normalized.toLowerCase();
 };
+
+class SwebowlClient {
+  readonly apiKey = '';
+
+  readonly baseUrl = '';
+
+  constructor({ baseUrl, apiKey }) {
+    this.apiKey = apiKey;
+    this.baseUrl = baseUrl;
+  }
+
+  get(url) {
+    return fetch(`${this.baseUrl}${url}&APIKey=${this.apiKey}`, {
+      headers: {
+        authority: 'api.swebowl.se',
+        referer: 'https://bits.swebowl.se/seriespel',
+      },
+    }).then((r) => r.json());
+  }
+}
 
 export const buildCalendar = async (incomingTeamName: string) => {
   //first we need an api token which we can extract from the bits homepage
@@ -15,16 +42,13 @@ export const buildCalendar = async (incomingTeamName: string) => {
 
   const [, apiKey] = pageVisitHTMLString.match(/apiKey: "(.+)"/);
 
+  const BitsClient = new SwebowlClient({
+    baseUrl: 'https://api.swebowl.se/api/v1',
+    apiKey,
+  });
   // then we request all games
-  const allGames = await fetch(
-    `https://api.swebowl.se/api/v1/Match?APIKey=${apiKey}&seasonId=2020`,
-    {
-      headers: {
-        authority: 'api.swebowl.se',
-        referer: 'https://bits.swebowl.se/seriespel',
-      },
-    }
-  ).then((r) => r.json());
+
+  const allGames = await BitsClient.get('/Match?seasonId=2020');
 
   const normalizedTeamName = normalize(incomingTeamName);
 
@@ -46,9 +70,56 @@ export const buildCalendar = async (incomingTeamName: string) => {
 
   const calendar = cal({ name: `${teamName}'s Bowling Calendar 2020` });
 
-  console.warn(matches);
+  for (let i = 0; i < matches.length; i += 1) {
+    const match = matches[i];
+    // https:// api.swebowl.se/api/v1/matchResult/GetMatchScores?APIKey=62fcl8gPUMXSQGW1t2Y8mc2zeTk97vbd&matchId=3200970
 
-  matches.forEach((match) => {
+    const buildStatsTable = async (match) => {
+      const matchSchemeId = await BitsClient.get(
+        `/matchResult/GetHeadInfo?id=${match.matchId}`
+      );
+
+      const matchResultsForTeams = await BitsClient.get(
+        `/matchResult/GetMatchResults?matchSchemeId=${matchSchemeId}&matchId=${match.matchId}`
+      );
+
+      const isHomeTeam =
+        normalize(match.matchHomeTeamName) === normalizedTeamName;
+
+      const playerList =
+        isHomeTeam === matchResultsForTeams.playerListHome ||
+        matchResultsForTeams.playerListAway;
+
+      return (
+        '<table><thead><tr>' +
+        ['name', '1', '2', '3', '4', 'Series', 'BanP', 'Plats'].map(
+          (t) => `<th>${t}</th>`
+        ) +
+        '</tr></thead>' +
+        '<tbody>' +
+        playerList
+          .map((p) => [
+            p.player,
+            p.result1,
+            p.result2,
+            p.result3,
+            p.result4,
+            p.totalSeries,
+            p.lanePoint,
+            p.place,
+          ])
+          .map(
+            (row) =>
+              '<tr>' + row.map((deep) => '<td>' + deep + '</td>') + '</tr>'
+          ) +
+        '</tbody></table>'
+      );
+    };
+
+    const matchResultTable = match.matchHasBeenPlayed
+      ? await buildStatsTable(match)
+      : '';
+
     calendar.createEvent({
       start: moment(match.matchDateTime),
       end: moment(match.matchDateTime).add(3, 'hours'),
@@ -58,12 +129,14 @@ export const buildCalendar = async (incomingTeamName: string) => {
         : match.matchVsTeams,
       description: `${
         match.matchHasBeenPlayed
-          ? match.matchVsResult
+          ? `<b>${match.matchVsResult}</b>\n\n${matchResultTable}`
           : match.matchOilPatternName
-      }\n${match.matchHallOnlineScoringUrl}`,
+      }\n<a href="${
+        match.matchHallOnlineScoringUrl
+      }">Live Scoring Available Here</a>`,
       location: match.matchHallName,
     });
-  });
+  }
   // then we return the calendar
   return calendar.toString();
 };
